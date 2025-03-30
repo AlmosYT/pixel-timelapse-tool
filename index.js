@@ -4,6 +4,8 @@ const sharp = require('sharp'); // Replace canvas with sharp
 const ffmpegPath = require('ffmpeg-static');
 const { spawn } = require('child_process');
 const cliProgress = require('cli-progress');
+const path = require('path');
+const { Readable } = require('stream');
 
 // Constants
 const CANVAS_SIZE = 1000;
@@ -79,28 +81,34 @@ async function parseAndSortCSV(filePath) {
 // Function to generate timelapse
 async function generateTimelapse(pixels, pixelsPerFrame) {
     const canvasBuffer = Buffer.alloc(CANVAS_SIZE * CANVAS_SIZE * 4, 255); // Persistent buffer for the canvas (white background)
-
     const framesPerSecond = 60;
 
-    // Progress bar for frame generation
-    const progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
-    progressBar.start(pixels.length, 0);
+    // Create a readable stream to feed frames to ffmpeg
+    const frameStream = new Readable({
+        read() {} // No-op, we'll push data manually
+    });
 
     const ffmpegProcess = spawn(ffmpegPath, [
         '-y',
         '-f', 'image2pipe',
         '-framerate', framesPerSecond.toString(),
-        '-i', 'pipe:0',
+        '-i', 'pipe:0', // Read from stdin
         '-pix_fmt', 'yuv420p',
         '-r', framesPerSecond.toString(),
-		'-c:v', 'libx264',
-		'-preset', 'ultrafast',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
         OUTPUT_VIDEO
     ]);
 
     ffmpegProcess.stdin.on('error', (err) => {
         console.error('Error writing to ffmpeg stdin:', err);
     });
+
+    frameStream.pipe(ffmpegProcess.stdin);
+
+    // Progress bar for frame generation
+    const progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
+    progressBar.start(pixels.length, 0);
 
     try {
         for (let i = 0; i < pixels.length; i += pixelsPerFrame) {
@@ -120,12 +128,11 @@ async function generateTimelapse(pixels, pixelsPerFrame) {
                 raw: { width: CANVAS_SIZE, height: CANVAS_SIZE, channels: 4 }
             }).png().toBuffer();
 
-            ffmpegProcess.stdin.write(frame);
-
+            frameStream.push(frame); // Push the frame to the stream
             progressBar.increment(chunk.length);
         }
 
-        ffmpegProcess.stdin.end();
+        frameStream.push(null); // Signal the end of the stream
         progressBar.stop();
 
         await new Promise((resolve, reject) => {
@@ -136,14 +143,10 @@ async function generateTimelapse(pixels, pixelsPerFrame) {
                     reject(new Error(`ffmpeg process exited with code ${code}`));
                 }
             });
-
-            ffmpegProcess.on('error', (err) => {
-                reject(err);
-            });
         });
     } catch (err) {
         progressBar.stop();
-        ffmpegProcess.stdin.end();
+        frameStream.push(null); // Ensure the stream ends on error
         throw err;
     }
 }
