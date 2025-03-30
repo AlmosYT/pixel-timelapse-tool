@@ -136,3 +136,5 @@ dist
 .pnp.*
 
 .data/
+data/pixels_example.csv
+data/pixels.csv
